@@ -15,26 +15,26 @@ input_dir = os.path.join(project_root, "jazz_ai_dataset", "raw_midis")
 output_csv = os.path.join(project_root, "jazz_ai_dataset", "processed", "chord_progressions.csv")
 
 # processedディレクトリがなければ作成
-processed_dir = os.path.dirname(output_csv)
-os.makedirs(processed_dir, exist_ok=True)
+os.makedirs(os.path.dirname(output_csv), exist_ok=True)
 
 data = []
 
-# input_dir内のMIDIファイルを処理
-for filename in os.listdir(input_dir):
-    if filename.lower().endswith((".mid", ".midi")):
-        midi_path = os.path.join(input_dir, filename)
-        try:
-            midi = converter.parse(midi_path)
-            # MIDIをコードに変換（chordify）
-            chords = midi.chordify().recurse().getElementsByClass('Chord')
-            chord_sequence = [c.pitchedCommonName for c in chords]
-            data.append({
-                "filename": filename,
-                "chords": "|".join(chord_sequence)
-            })
-        except Exception as e:
-            print(f"Error processing {filename}: {e}")
+# os.walk() を使って再帰的にファイルを探索
+for root, dirs, files in os.walk(input_dir):
+    for filename in files:
+        if filename.lower().endswith((".mid", ".midi")):
+            midi_path = os.path.join(root, filename)
+            try:
+                midi = converter.parse(midi_path)
+                # MIDIをコードに変換（chordify）
+                chords = midi.chordify().recurse().getElementsByClass('Chord')
+                chord_sequence = [c.pitchedCommonName for c in chords]
+                data.append({
+                    "filename": midi_path,
+                    "chords": "|".join(chord_sequence)
+                })
+            except Exception as e:
+                print(f"Error processing {midi_path}: {e}")
 
 # DataFrameに変換してCSVに保存
 df = pd.DataFrame(data)
