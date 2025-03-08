@@ -1,0 +1,17 @@
+# AIデータセット関連フォルダ
+jazz_ai_dataset/
+
+# Python環境関連
+venv/
+__pycache__/
+*.pyc
+__pycache__/
+
+# IDE関連ファイル
+.vscode/
+.idea/
+
+# その他、不要ファイル
+*.tmp
+*.log
+*.DS_Store
