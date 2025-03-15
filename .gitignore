@@ -15,3 +15,6 @@ __pycache__/
 *.tmp
 *.log
 *.DS_Store
+
+# バックアップ用のファイルを無視
+src/ml/old/
