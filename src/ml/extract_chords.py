@@ -8,6 +8,7 @@ import os
 import time
 import json
 import csv
+import signal
 import multiprocessing as mp
 from tqdm import tqdm
 from music21 import converter, chord
@@ -22,50 +23,98 @@ VALID_EXTENSIONS = (".mid", ".midi")  # 対象とする拡張子
 BATCH_SIZE = 200  # 一度に処理するファイル数
 CHECKPOINT_INTERVAL = 50  # チェックポイントを保存する間隔（ファイル数）
 MAX_WORKERS = max(1, mp.cpu_count() - 1)  # CPUコア数 - 1 (少なくとも1)
+FILE_TIMEOUT = 60  # 1ファイルの処理タイムアウト（秒）
 # --------------------------------------------------------
 
-def process_file(midi_path):
-    """
-    1ファイルのMIDIを解析してコード進行を抽出する関数。
-    エラーがあればNoneを返す。
-    """
+# タイムアウトハンドラー（Windows対応版）
+class TimeoutError(Exception):
+    pass
+
+def process_file_with_timeout(midi_path):
+    """タイムアウト機能付きのファイル処理関数（Windows用）"""
+    start_time = time.time()
+    
     try:
-        start_time = time.time()
-        
-        # ファイルサイズチェック（念のため）
+        # ファイルサイズチェック
         size_bytes = os.path.getsize(midi_path)
         size_mb = size_bytes / (1024 * 1024)
         if size_mb > MAX_FILE_SIZE_MB:
             return None
             
-        midi = converter.parse(midi_path)
+        # ファイル処理にタイムアウトを設定
+        result = None
+        processing_time = 0
         
-        # MIDIをコードに変換（chordify）してChordオブジェクトを取得
-        chords = midi.chordify().recurse().getElementsByClass('Chord')
+        # マルチプロセスを使ったタイムアウト実装（Windows対応）
+        def worker_process(midi_path, result_queue):
+            try:
+                midi = converter.parse(midi_path)
+                chords = midi.chordify().recurse().getElementsByClass('Chord')
+                chord_sequence = [c.pitchedCommonName for c in chords]
+                if chord_sequence:
+                    result_queue.put("|".join(chord_sequence))
+                else:
+                    result_queue.put(None)
+            except Exception as e:
+                print(f"Error in worker: {e}")
+                result_queue.put(None)
         
-        # コード進行の抽出（空なら None を返す）
-        chord_sequence = [c.pitchedCommonName for c in chords]
-        if not chord_sequence:
+        # 結果キュー
+        result_queue = mp.Queue()
+        
+        # ワーカープロセス作成
+        process = mp.Process(target=worker_process, args=(midi_path, result_queue))
+        process.start()
+        
+        # タイムアウト付き待機
+        process.join(timeout=FILE_TIMEOUT)
+        
+        if process.is_alive():
+            # タイムアウト発生、プロセスを強制終了
+            process.terminate()
+            process.join()
+            print(f"Timeout after {FILE_TIMEOUT} seconds: {midi_path}")
+            # スキップリストに追加
+            with open("skipped_files.txt", "a") as skip_file:
+                skip_file.write(f"{midi_path},timeout\n")
             return None
-            
-        elapsed = time.time() - start_time
-        print(f"Processed {midi_path} in {elapsed:.2f} seconds")
         
-        return {
-            "filename": midi_path,
-            "chords": "|".join(chord_sequence),
-            "processing_time": elapsed
-        }
+        # 結果の取得（タイムアウトしなかった場合）
+        if not result_queue.empty():
+            chord_str = result_queue.get()
+            if chord_str:
+                processing_time = time.time() - start_time
+                print(f"Processed {midi_path} in {processing_time:.2f} seconds")
+                return {
+                    "filename": midi_path,
+                    "chords": chord_str,
+                    "processing_time": processing_time
+                }
+        
+        return None
+        
     except Exception as e:
-        print(f"Error processing {midi_path}: {e}")
+        processing_time = time.time() - start_time
+        print(f"Error processing {midi_path} after {processing_time:.2f} seconds: {e}")
+        # エラーファイルをスキップリストに追加
+        with open("skipped_files.txt", "a") as skip_file:
+            skip_file.write(f"{midi_path},error,{str(e)}\n")
         return None
 
 def get_file_list(input_dir):
-    """
-    対象ディレクトリから処理すべきファイルリストを取得する
-    ファイルサイズでのフィルタリングを含む
-    """
+    """対象ディレクトリから処理すべきファイルリストを取得する"""
     file_paths = []
+    
+    # スキップすべきファイルリストを読み込む
+    skip_list = set()
+    if os.path.exists("skipped_files.txt"):
+        with open("skipped_files.txt", "r") as skip_file:
+            for line in skip_file:
+                parts = line.strip().split(",", 1)
+                if parts:
+                    skip_list.add(parts[0])
+    
+    print(f"Found {len(skip_list)} files to skip from previous runs")
     
     print("Scanning for MIDI files...")
     total_files_scanned = 0
@@ -74,17 +123,18 @@ def get_file_list(input_dir):
         for filename in files:
             total_files_scanned += 1
             
-            # 進捗表示（大量ファイルのスキャン時）
             if total_files_scanned % 10000 == 0:
                 print(f"Scanned {total_files_scanned} files...")
                 
-            # 拡張子チェック
             if not filename.lower().endswith(VALID_EXTENSIONS):
                 continue
             
             midi_path = os.path.join(root_dir, filename)
             
-            # ファイルサイズチェック
+            # スキップリストに含まれるファイルは除外
+            if midi_path in skip_list:
+                continue
+            
             try:
                 size_bytes = os.path.getsize(midi_path)
                 size_kb = size_bytes / 1024
@@ -98,6 +148,7 @@ def get_file_list(input_dir):
                 print(f"Error checking file {midi_path}: {e}")
     
     print(f"Found {len(file_paths)} valid MIDI files out of {total_files_scanned} scanned")
+    print(f"Skipping {len(skip_list)} problematic files from previous runs")
     return file_paths
 
 def load_checkpoint(checkpoint_file):
@@ -131,6 +182,7 @@ def process_files_in_batches(file_paths, output_dir, checkpoint_file):
     """
     ファイルをバッチ処理して結果を逐次保存する
     チェックポイント機能付き
+    タイムアウト機能付き
     """
     # チェックポイントから復元
     checkpoint_data = load_checkpoint(checkpoint_file)
@@ -169,29 +221,38 @@ def process_files_in_batches(file_paths, output_dir, checkpoint_file):
         print(f"\nProcessing batch {i+1}/{total_batches} ({len(current_batch_files)} files)")
         batch_start_time = time.time()
         
+        # 現在処理中のファイルを記録するファイル
+        with open("current_processing.txt", "w") as curr_file:
+            curr_file.write(f"batch:{i+1}/{total_batches}\n")
+            curr_file.write(f"started:{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        
         # 並列処理
         results = []
-        with mp.Pool(MAX_WORKERS) as pool:
-            for result in tqdm(pool.imap_unordered(process_file, current_batch_files), 
-                             total=len(current_batch_files), 
-                             desc=f"Batch {i+1}/{total_batches}"):
-                if result is not None:
-                    results.append(result)
-                    
-                    # 一定間隔でチェックポイント更新（細かめに）
-                    if len(results) % CHECKPOINT_INTERVAL == 0:
-                        # 中間結果のCSV追加
-                        with open(results_file, 'a', newline='', encoding='utf-8') as f:
-                            writer = csv.writer(f)
-                            for res in results[-CHECKPOINT_INTERVAL:]:
-                                writer.writerow([res['filename'], res['chords'], res['processing_time']])
-                        
-                        # 処理済みリストの更新
+        for midi_file in tqdm(current_batch_files, desc=f"Batch {i+1}/{total_batches}"):
+            # 現在処理中のファイルを記録
+            with open("current_processing.txt", "a") as curr_file:
+                curr_file.write(f"file:{midi_file}\n")
+            
+            # タイムアウト機能付きの処理関数を呼び出し
+            result = process_file_with_timeout(midi_file)
+            
+            if result is not None:
+                results.append(result)
+                
+                # 一定間隔でチェックポイント更新（細かめに）
+                if len(results) % CHECKPOINT_INTERVAL == 0:
+                    # 中間結果のCSV追加
+                    with open(results_file, 'a', newline='', encoding='utf-8') as f:
+                        writer = csv.writer(f)
                         for res in results[-CHECKPOINT_INTERVAL:]:
-                            processed_files.add(res['filename'])
-                            
-                        # チェックポイント保存
-                        save_checkpoint(checkpoint_file, list(processed_files), i, results_file)
+                            writer.writerow([res['filename'], res['chords'], res['processing_time']])
+                    
+                    # 処理済みリストの更新
+                    for res in results[-CHECKPOINT_INTERVAL:]:
+                        processed_files.add(res['filename'])
+                        
+                    # チェックポイント保存
+                    save_checkpoint(checkpoint_file, list(processed_files), i, results_file)
         
         # バッチ内の残りの結果をCSVに追加
         remaining_results = [r for r in results if r['filename'] not in processed_files]
@@ -210,6 +271,10 @@ def process_files_in_batches(file_paths, output_dir, checkpoint_file):
         print(f"Batch {i+1} completed in {batch_elapsed:.2f} seconds")
         print(f"Extracted chords from {len(results)}/{len(current_batch_files)} files in this batch")
         print(f"Total progress: {len(processed_files)}/{len(file_paths)} files ({len(processed_files)/len(file_paths)*100:.1f}%)")
+        
+        # 現在処理中ファイルの記録をクリア
+        with open("current_processing.txt", "w") as curr_file:
+            curr_file.write("completed\n")
     
     print(f"\nProcessing complete! Results saved to: {results_file}")
     print(f"Total files processed: {len(processed_files)}/{len(file_paths)}")
@@ -248,7 +313,7 @@ def main():
     print(f"Checkpoint interval: {CHECKPOINT_INTERVAL} files")
     
     # テストモードフラグとテスト件数
-    test_mode = True  # テストモードの場合はTrue
+    test_mode = False  # テストモードの場合はTrue
     test_file_count = 1000  # テストするファイル数
     
     # 処理開始時間
