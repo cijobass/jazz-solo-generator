@@ -101,9 +101,19 @@ class ChordProgressionModel:
             
         return loss.item()
     
-    def generate(self, tokenizer, prompt=None, max_length=128, num_return_sequences=1, temperature=1.0):
+    def generate(self, tokenizer, prompt=None, max_length=128, num_return_sequences=1, temperature=0.7):
         """コード進行の生成"""
         self.model.eval()
+        
+        # プロンプトを整形
+        if prompt:
+            # Chord-接頭辞を削除
+            if prompt.startswith("Chord-"):
+                prompt = prompt.replace("Chord-", "")
+            
+            # 末尾にカンマを追加
+            if not prompt.endswith(','):
+                prompt = prompt + ','
         
         # プロンプトがない場合は開始トークンから始める
         if prompt is None or prompt == "":
@@ -117,23 +127,47 @@ class ChordProgressionModel:
             )
             input_ids = inputs["input_ids"].to(self.device)
         
+        # 生成パラメータを調整
+        generation_config = {
+            "max_length": max_length,
+            "temperature": temperature,
+            "num_return_sequences": num_return_sequences,
+            "do_sample": True,
+            "pad_token_id": tokenizer.pad_token_id,
+            "bos_token_id": tokenizer.bos_token_id,
+            "eos_token_id": tokenizer.eos_token_id,
+            "top_p": 0.92,           # 核サンプリング
+            "top_k": 50,             # 上位k個のトークンからサンプリング
+            "repetition_penalty": 1.3,  # 繰り返しペナルティ
+            "no_repeat_ngram_size": 2  # 同じ2-gramの繰り返しを禁止
+        }
+        
         # 生成
         with torch.no_grad():
             outputs = self.model.generate(
                 input_ids,
-                max_length=max_length,
-                temperature=temperature,
-                num_return_sequences=num_return_sequences,
-                do_sample=True,
-                pad_token_id=tokenizer.pad_token_id,
-                bos_token_id=tokenizer.bos_token_id,
-                eos_token_id=tokenizer.eos_token_id
+                **generation_config
             )
         
         # トークンをデコード
         generated_texts = []
         for output in outputs:
             text = tokenizer.decode(output, skip_special_tokens=True)
-            generated_texts.append(text)
+            
+            # 不要なスペースを削除
+            text = text.replace(" , ", ",").strip()
+            
+            # プロンプト部分の削除（オプション）
+            if prompt and text.startswith(prompt):
+                text = text[len(prompt):].strip()
+                if text.startswith(','):
+                    text = text[1:].strip()
+            
+            # 可読性向上のための後処理
+            # カンマでコード進行を区切る
+            parts = text.split(',')
+            formatted_text = ', '.join([p.strip() for p in parts if p.strip()])
+            
+            generated_texts.append(formatted_text)
             
         return generated_texts

@@ -114,15 +114,27 @@ def train(
             model.save(os.path.join(output_dir, "best_model"))
             print(f"Model saved at epoch {epoch+1} with validation loss {best_val_loss:.4f}")
             
-            # サンプル生成
-            samples = model.generate(
-                tokenizer,
-                prompt="Dm7,G7",
-                num_return_sequences=3
-            )
+            # サンプル生成のためのシード（コード進行の数字表現）
+            test_prompts = [
+                "4-0-4",  # サンプルデータから抽出したコードパターン
+                "0-3-6",
+                "7-11-2",
+                "5-9-0",
+                "2-5-10"
+            ]
+            
             print("Sample generations:")
-            for i, sample in enumerate(samples):
-                print(f"  {i+1}: {sample}")
+            for i, prompt in enumerate(test_prompts):
+                print(f"\nInput pattern {i+1}: {prompt}")
+                samples = model.generate(
+                    tokenizer,
+                    prompt=prompt,
+                    num_return_sequences=1,
+                    temperature=0.7,
+                    max_length=64
+                )
+                for j, sample in enumerate(samples):
+                    print(f"  Generated: {sample}")
         
         # 最新モデルの保存
         model.save(os.path.join(output_dir, "latest_model"))

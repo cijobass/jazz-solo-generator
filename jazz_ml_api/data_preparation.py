@@ -4,7 +4,8 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import PreTrainedTokenizerFast
-from tokenizers import Tokenizer, models, pre_tokenizers, trainers, processors
+from tokenizers import Tokenizer, models, pre_tokenizers, trainers, processors, normalizers
+import numpy as np
 
 class ChordProgressionDataset(Dataset):
     def __init__(self, file_path, tokenizer, max_length=128):
@@ -20,9 +21,29 @@ class ChordProgressionDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
         
-        # コード進行のみを抽出（不要なカラムを削除）
-        self.chord_progressions = self.data['chords'].tolist()
+        # コード進行のみを抽出
+        self.chord_progressions = []
+        chord_data = self.data['chords'].astype(str).tolist()
         
+        # コード進行の前処理
+        for progression in chord_data:
+            # パイプ記号による分割
+            if '|' in progression:
+                # 小節単位のコード進行を抽出
+                chords = progression.split('|')
+                # Chord-接頭辞を削除し、最初の20小節だけを使用（長すぎるシーケンスを避ける）
+                cleaned_chords = [c.replace('Chord-', '') for c in chords[:20]]
+                if cleaned_chords:
+                    # 小節単位での区切りを保持するためにスペースをカンマに置き換える
+                    self.chord_progressions.append(','.join(cleaned_chords))
+            else:
+                # パイプ記号がない場合はスキップ
+                continue
+        
+        print(f"有効なコード進行数: {len(self.chord_progressions)}")
+        if len(self.chord_progressions) > 0:
+            print(f"サンプル: {self.chord_progressions[0][:100]}...")
+    
     def __len__(self):
         return len(self.chord_progressions)
     
@@ -53,7 +74,7 @@ class ChordProgressionDataset(Dataset):
             "labels": labels
         }
 
-def create_chord_tokenizer(chord_progressions, vocab_size=5000, save_path="models/tokenizer"):
+def create_chord_tokenizer(chord_progressions, vocab_size=10000, save_path="models/tokenizer"):
     """
     コード進行専用のトークナイザーを作成
     
@@ -67,27 +88,48 @@ def create_chord_tokenizer(chord_progressions, vocab_size=5000, save_path="model
     """
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     
-    # BPEモデルを使用
-    tokenizer = Tokenizer(models.BPE())
+    # ユニークなコード進行パターンを分析
+    all_tokens = []
+    for progression in chord_progressions:
+        tokens = progression.split(',')
+        all_tokens.extend(tokens)
     
-    # プリトークナイザー設定
-    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel()
+    unique_tokens = set(all_tokens)
+    print(f"ユニークなコードパターン数: {len(unique_tokens)}")
+    print(f"サンプル: {list(unique_tokens)[:10]}")
+    
+    # WordPieceモデルのトークナイザーを作成
+    tokenizer = Tokenizer(models.WordPiece(unk_token="[UNK]"))
+    
+    # ノーマライザーの設定
+    tokenizer.normalizer = normalizers.Sequence([
+        normalizers.Replace(r"\s+", " "),
+        normalizers.Strip()
+    ])
+    
+    # プリトークナイザーの設定（カンマと数字の組み合わせを適切に扱う）
+    tokenizer.pre_tokenizer = pre_tokenizers.Sequence([
+        pre_tokenizers.Split(pattern=",", behavior="isolated"),
+        pre_tokenizers.WhitespaceSplit()
+    ])
     
     # トレーナーの設定
-    trainer = trainers.BpeTrainer(
+    special_tokens = ["[PAD]", "[BOS]", "[EOS]", "[UNK]", "[SEP]", "[MASK]"]
+    trainer = trainers.WordPieceTrainer(
         vocab_size=vocab_size,
-        special_tokens=["<pad>", "<bos>", "<eos>", "<unk>"]
+        special_tokens=special_tokens,
+        continuing_subword_prefix="##"
     )
     
     # トークナイザーの訓練
     tokenizer.train_from_iterator(chord_progressions, trainer)
     
-    # 後処理の設定（EOS, BOSトークンの追加など）
+    # 後処理の設定
     tokenizer.post_processor = processors.TemplateProcessing(
-        single="<bos> $A <eos>",
+        single="[BOS] $A [EOS]",
         special_tokens=[
-            ("<bos>", tokenizer.token_to_id("<bos>")),
-            ("<eos>", tokenizer.token_to_id("<eos>"))
+            ("[BOS]", tokenizer.token_to_id("[BOS]")),
+            ("[EOS]", tokenizer.token_to_id("[EOS]"))
         ]
     )
     
@@ -97,10 +139,12 @@ def create_chord_tokenizer(chord_progressions, vocab_size=5000, save_path="model
     # Transformers互換のトークナイザーに変換
     fast_tokenizer = PreTrainedTokenizerFast(
         tokenizer_file=f"{save_path}/tokenizer.json",
-        bos_token="<bos>",
-        eos_token="<eos>",
-        pad_token="<pad>",
-        unk_token="<unk>"
+        bos_token="[BOS]",
+        eos_token="[EOS]",
+        pad_token="[PAD]",
+        unk_token="[UNK]",
+        sep_token="[SEP]",
+        mask_token="[MASK]"
     )
     
     return fast_tokenizer
@@ -117,24 +161,26 @@ def prepare_chord_data(csv_path, batch_size=32, train_ratio=0.8):
     Returns:
         tuple: (train_loader, val_loader, tokenizer)
     """
-    # データ読み込み
-    data = pd.read_csv(csv_path)
-    chord_progressions = data['chords'].tolist()
-    
     # トークナイザーの作成または読み込み
     tokenizer_path = "models/tokenizer"
     if os.path.exists(f"{tokenizer_path}/tokenizer.json"):
+        print(f"既存のトークナイザーを読み込みます: {tokenizer_path}/tokenizer.json")
         tokenizer = PreTrainedTokenizerFast(
             tokenizer_file=f"{tokenizer_path}/tokenizer.json",
-            bos_token="<bos>",
-            eos_token="<eos>",
-            pad_token="<pad>",
-            unk_token="<unk>"
+            bos_token="[BOS]",
+            eos_token="[EOS]",
+            pad_token="[PAD]",
+            unk_token="[UNK]",
+            sep_token="[SEP]",
+            mask_token="[MASK]"
         )
     else:
-        tokenizer = create_chord_tokenizer(chord_progressions, save_path=tokenizer_path)
+        print("新しいトークナイザーを作成します")
+        # データセットを作成して前処理されたコード進行を取得
+        temp_dataset = ChordProgressionDataset(csv_path, None)
+        tokenizer = create_chord_tokenizer(temp_dataset.chord_progressions, save_path=tokenizer_path)
     
-    # データセットの作成
+    # データセットの作成（トークナイザーを渡して）
     dataset = ChordProgressionDataset(csv_path, tokenizer)
     
     # 訓練データと検証データに分割
