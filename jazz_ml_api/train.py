@@ -17,7 +17,8 @@ def train(
     max_length=128,
     n_layer=6,
     n_head=8,
-    n_embd=512
+    n_embd=512,
+    convert_to_chord_names=False
 ):
     """
     コード進行モデルの訓練
@@ -39,7 +40,8 @@ def train(
     # データの準備
     train_loader, val_loader, tokenizer = prepare_chord_data(
         csv_path,
-        batch_size=batch_size
+        batch_size=batch_size,
+        convert_to_chord_names=convert_to_chord_names
     )
     
     # モデルの初期化
@@ -108,7 +110,7 @@ def train(
         # 学習率の更新
         scheduler.step()
         
-        # モデルの保存（検証ロスが改善した場合）
+        # モデルの保存（検証ロスが改善した場合）のセクションを修正
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             model.save(os.path.join(output_dir, "best_model"))
@@ -116,7 +118,7 @@ def train(
             
             # サンプル生成のためのシード（コード進行の数字表現）
             test_prompts = [
-                "4-0-4",  # サンプルデータから抽出したコードパターン
+                "4-0-4",
                 "0-3-6",
                 "7-11-2",
                 "5-9-0",
@@ -124,6 +126,9 @@ def train(
             ]
             
             print("Sample generations:")
+            
+            # 数字表記のサンプル
+            print("\n数字表記のサンプル:")
             for i, prompt in enumerate(test_prompts):
                 print(f"\nInput pattern {i+1}: {prompt}")
                 samples = model.generate(
@@ -131,7 +136,23 @@ def train(
                     prompt=prompt,
                     num_return_sequences=1,
                     temperature=0.7,
-                    max_length=64
+                    max_length=64,
+                    convert_to_chord_names=False
+                )
+                for j, sample in enumerate(samples):
+                    print(f"  Generated: {sample}")
+            
+            # コード名変換サンプル
+            print("\nコード名変換サンプル:")
+            for i, prompt in enumerate(test_prompts):
+                print(f"\nInput pattern {i+1}: {prompt}")
+                samples = model.generate(
+                    tokenizer,
+                    prompt=prompt,
+                    num_return_sequences=1,
+                    temperature=0.7,
+                    max_length=64,
+                    convert_to_chord_names=True
                 )
                 for j, sample in enumerate(samples):
                     print(f"  Generated: {sample}")
@@ -163,6 +184,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_layer", type=int, default=6, help="Number of transformer layers")
     parser.add_argument("--n_head", type=int, default=8, help="Number of attention heads")
     parser.add_argument("--n_embd", type=int, default=512, help="Embedding size")
+    parser.add_argument("--convert_chord_names", action="store_true", help="Convert chord numbers to chord names")
     
     args = parser.parse_args()
     
@@ -175,5 +197,6 @@ if __name__ == "__main__":
         max_length=args.max_length,
         n_layer=args.n_layer,
         n_head=args.n_head,
-        n_embd=args.n_embd
+        n_embd=args.n_embd,
+        convert_to_chord_names=args.convert_chord_names
     )
